@@ -25,9 +25,10 @@ def serialize_records(records: list[dict]) -> list[dict]:
         time.sleep(extra_ms / 1000.0)
 
     rounds = _effective_rounds()
+    dumps = json.dumps
     out: list[dict] = []
     for record in records:
-        payload = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        payload = dumps(record, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         for i in range(rounds):
             digest = hashlib.sha256(f"{digest}:{i}".encode("utf-8")).hexdigest()
