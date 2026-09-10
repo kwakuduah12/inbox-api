@@ -1,0 +1,32 @@
+version: 1
+service_area: inbox
+global_filters:
+  exclude_paths:
+    - "docs/**"
+    - "**/*.md"
+    - "tests/**"
+hotspots:
+  - id: ingest-path
+    paths:
+      - "inbox_api/app/serialize.py"
+      - "inbox_api/app/index.py"
+    workloads:
+      - ingest_bulk
+    notes: "CPU-heavy serialize + in-memory index"
+workloads:
+  ingest_bulk:
+    description: Bulk ingest of N records through serialize then index
+    command:
+      - python
+      - -m
+      - inbox_api.workloads.ingest_bulk
+    repeats: 5
+    operations:
+      - name: serialize
+        baseline_ms: 260.0
+        threshold_pct: 30
+        threshold_ms: 80
+      - name: index
+        baseline_ms: 60.0
+        threshold_pct: 30
+        threshold_ms: 40

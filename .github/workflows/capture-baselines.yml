@@ -1,0 +1,27 @@
+name: capture-baselines
+
+on:
+  workflow_dispatch:
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install inbox-api and hotspot-detector
+        run: |
+          pip install -e ".[dev]"
+          pip install "git+https://github.com/kwakuduah12/hotspot-detector.git@main"
+      - name: Capture baselines in the CI Docker environment
+        run: |
+          hotspot-detector capture \
+            --manifest hotspot-manifest.yaml \
+            --output baselines.yaml
+      - name: Upload baselines
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-baselines
+          path: baselines.yaml

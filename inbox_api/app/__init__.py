@@ -1,0 +1,1 @@
+"""Inbox FastAPI application package."""

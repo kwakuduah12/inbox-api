@@ -1,0 +1,79 @@
+name: perf
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  hotspot:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install inbox-api and hotspot-detector
+        run: |
+          pip install -e ".[dev]"
+          pip install "git+https://github.com/kwakuduah12/hotspot-detector.git@main"
+
+      - name: List changed files
+        run: |
+          git diff --name-only "origin/${{ github.base_ref }}...HEAD" > /tmp/changed.txt
+          echo "Changed files:"
+          cat /tmp/changed.txt || true
+
+      - name: Run hotspot gate
+        run: |
+          hotspot-detector gate \
+            --manifest hotspot-manifest.yaml \
+            --changed-files /tmp/changed.txt \
+            --base-ref "origin/${{ github.base_ref }}" \
+            --results-dir results
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hotspot-results
+          path: results/
+          if-no-files-found: ignore
+
+      - name: Post sticky PR comment
+        if: hashFiles('results/report.md') != ''
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- hotspot-detector-report -->';
+            const body = fs.readFileSync('results/report.md', 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

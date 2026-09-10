@@ -1,0 +1,116 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  remeasure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install inbox-api and hotspot-detector
+        run: |
+          pip install -e ".[dev]"
+          pip install "git+https://github.com/kwakuduah12/hotspot-detector.git@main"
+      - name: Run all workloads
+        run: |
+          mkdir -p results
+          hotspot-detector run \
+            --manifest hotspot-manifest.yaml \
+            --all \
+            --output results/nightly-run.json
+          COMPARE_ARGS=(
+            --run results/nightly-run.json
+            --manifest hotspot-manifest.yaml
+            --output results/nightly-compare.json
+          )
+          if [ -f baselines.yaml ]; then
+            COMPARE_ARGS+=(--baselines baselines.yaml)
+          fi
+          hotspot-detector compare "${COMPARE_ARGS[@]}"
+          hotspot-detector report \
+            --run results/nightly-run.json \
+            --compare results/nightly-compare.json \
+            --manifest hotspot-manifest.yaml \
+            --output results/nightly-report.md
+          hotspot-detector capture \
+            --manifest hotspot-manifest.yaml \
+            --from-run results/nightly-run.json \
+            --output results/baselines.yaml
+      - name: Upload nightly artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-baselines
+          path: results/
+      - name: Skip suggested PR off the default branch
+        if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        run: echo "Nightly suggestions only open from ${{ github.event.repository.default_branch }}. Artifacts are still uploaded."
+      - name: Decide whether to suggest a golden PR
+        id: suggest
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from hotspot_detector.compare import golden_update_reason
+          from hotspot_detector.manifest import BaselineCapture, load_baselines
+
+          compare = json.loads(Path("results/nightly-compare.json").read_text())
+          current = (
+              load_baselines("baselines.yaml")
+              if Path("baselines.yaml").exists()
+              else BaselineCapture()
+          )
+          reason = golden_update_reason(
+              compare,
+              current,
+              load_baselines("results/baselines.yaml"),
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
+              fh.write(f"should_pr={'true' if reason else 'false'}\n")
+              if reason:
+                  fh.write(f"reason={reason}\n")
+          print(reason or "golden still holds")
+          PY
+      - name: Open suggested golden PR
+        if: >-
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+          && steps.suggest.outputs.should_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          default_branch="${{ github.event.repository.default_branch }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$default_branch"
+          git checkout -B nightly/golden-update "origin/${default_branch}"
+          cp results/baselines.yaml baselines.yaml
+          git add baselines.yaml
+          if git diff --cached --quiet; then
+            echo "Proposed snapshot matches the checked-in golden."
+            exit 0
+          fi
+          git commit -m "Suggest golden snapshot from nightly capture."
+          git push -u origin nightly/golden-update --force
+          existing="$(gh pr list --head nightly/golden-update --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh pr create --base "$default_branch" --head nightly/golden-update \
+              --title "Nightly golden snapshot" \
+              --body "$(cat <<'EOF'
+          Nightly re-measured inbox ingest in CI Docker. Review `baselines.yaml`, then merge to accept the floor. This PR does not merge itself.
+          EOF
+          )"
+          fi
