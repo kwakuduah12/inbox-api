@@ -1,0 +1,168 @@
+name: synthetic-traffic
+
+# Jenkins-style periodic pipeline: open a PR, then run the detector in this
+# job. GITHUB_TOKEN PRs do not trigger other workflows, so perf.yml will not
+# double-run. About 1 in 3 ticks is a hotspot (~every 30 min at */10).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: hot, cold, or auto (auto = hotspot every 3rd 10-min slot)
+        type: choice
+        options: [auto, cold, hot]
+        default: auto
+
+concurrency:
+  group: synthetic-traffic
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Apply synthetic agent change
+        id: change
+        run: |
+          kind="${{ github.event.inputs.kind || 'auto' }}"
+          python scripts/synthetic_traffic.py --kind "$kind"
+
+      - name: Open PR as a synthetic agent
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="synthetic/${{ steps.change.outputs.kind }}-${{ steps.change.outputs.tick }}"
+          git checkout -b "$branch"
+          git add ${{ steps.change.outputs.files }}
+          git commit -m "${{ steps.change.outputs.title }}"
+          git push -u origin HEAD
+          gh label create synthetic --description "Scheduled synthetic traffic" --color "ededed" 2>/dev/null || true
+          gh label create hotspot --description "Touches a hotspot file" --color "d93f0b" 2>/dev/null || true
+          gh label create cold --description "Not a hotspot; detector should skip" --color "0e8a16" 2>/dev/null || true
+          url="$(gh pr create \
+            --title "${{ steps.change.outputs.title }}" \
+            --body-file /tmp/synthetic-pr-body.md \
+            --label synthetic \
+            --label "${{ steps.change.outputs.label }}")"
+          number="${url##*/}"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Opened $url"
+
+      - name: Install inbox-api and hotspot-detector
+        run: |
+          pip install -e ".[dev]"
+          pip install "git+https://github.com/kwakuduah12/hotspot-detector.git@main"
+
+      - name: Run hotspot gate (Jenkins stage)
+        run: |
+          git diff --name-only origin/${{ github.event.repository.default_branch }}...HEAD > /tmp/changed.txt
+          echo "Changed files:"
+          cat /tmp/changed.txt
+          hotspot-detector gate \
+            --manifest hotspot-manifest.yaml \
+            --changed-files /tmp/changed.txt \
+            --base-ref "origin/${{ github.event.repository.default_branch }}" \
+            --results-dir results
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: synthetic-hotspot-results
+          path: results/
+          if-no-files-found: ignore
+
+      - name: Post sticky PR comment
+        if: hashFiles('results/report.md') != ''
+        uses: actions/github-script@v9
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- hotspot-detector-report -->';
+            const body = fs.readFileSync('results/report.md', 'utf8');
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Land cold PRs; keep recent hotspot proofs open
+        if: always() && steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          KIND: ${{ steps.change.outputs.kind }}
+        run: |
+          if [ "$KIND" = "cold" ]; then
+            gh pr merge "$PR_NUMBER" --squash --delete-branch || true
+          fi
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from datetime import datetime, timezone
+
+          def gh(*args) -> str:
+              return subprocess.check_output(["gh", *args], text=True)
+
+          raw = gh(
+              "pr", "list",
+              "--label", "synthetic",
+              "--state", "open",
+              "--json", "number,createdAt,labels,title",
+          )
+          prs = json.loads(raw)
+          now = datetime.now(timezone.utc)
+          hot = []
+          for pr in prs:
+              names = {label["name"] for label in pr.get("labels") or []}
+              created = datetime.fromisoformat(pr["createdAt"].replace("Z", "+00:00"))
+              age_h = (now - created).total_seconds() / 3600
+              if "cold" in names:
+                  subprocess.run(["gh", "pr", "merge", str(pr["number"]), "--squash", "--delete-branch"], check=False)
+              elif "hotspot" in names:
+                  hot.append((created, pr["number"], age_h))
+          hot.sort(reverse=True)
+          for _, number, age_h in hot[2:]:
+              subprocess.run(["gh", "pr", "close", str(number), "--delete-branch", "--comment", "Closing older synthetic hotspot proof."], check=False)
+          for _, number, age_h in hot[:2]:
+              if age_h > 3:
+                  subprocess.run(["gh", "pr", "close", str(number), "--delete-branch", "--comment", "Closing synthetic hotspot proof after 3h."], check=False)
+          PY
