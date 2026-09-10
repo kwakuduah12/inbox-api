@@ -1,17 +1,17 @@
 name: synthetic-traffic
 
-# Jenkins-style periodic pipeline: open a PR, then run the detector in this
-# job. GITHUB_TOKEN PRs do not trigger other workflows, so perf.yml will not
-# double-run. About 1 in 3 ticks is a hotspot (~every 30 min at */10).
+# Jenkins-style periodic pipeline: open a PR, run the detector, then either
+# auto-merge (cold), leave open (hot ok), or hand off to the autofix agent
+# (hot regression). GITHUB_TOKEN PRs do not start other workflows.
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       kind:
-        description: hot, cold, or auto (auto = hotspot every 3rd 10-min slot)
+        description: auto / cold / hot / regression (plants HASH_ROUNDS bump)
         type: choice
-        options: [auto, cold, hot]
+        options: [auto, cold, hot, regression]
         default: auto
 
 concurrency:
@@ -26,6 +26,12 @@ jobs:
   open-pr:
     runs-on: ubuntu-latest
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      url: ${{ steps.pr.outputs.url }}
+      kind: ${{ steps.change.outputs.kind }}
+      overall: ${{ steps.gate.outputs.overall }}
+      default_branch: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,6 +62,7 @@ jobs:
           gh label create synthetic --description "Scheduled synthetic traffic" --color "ededed" 2>/dev/null || true
           gh label create hotspot --description "Touches a hotspot file" --color "d93f0b" 2>/dev/null || true
           gh label create cold --description "Not a hotspot; detector should skip" --color "0e8a16" 2>/dev/null || true
+          gh label create autofixed --description "Regression repaired by autofix agent" --color "5319e7" 2>/dev/null || true
           url="$(gh pr create \
             --title "${{ steps.change.outputs.title }}" \
             --body-file /tmp/synthetic-pr-body.md \
@@ -72,6 +79,7 @@ jobs:
           pip install "git+https://github.com/kwakuduah12/hotspot-detector.git@main"
 
       - name: Run hotspot gate (Jenkins stage)
+        id: gate
         run: |
           git diff --name-only origin/${{ github.event.repository.default_branch }}...HEAD > /tmp/changed.txt
           echo "Changed files:"
@@ -81,12 +89,20 @@ jobs:
             --changed-files /tmp/changed.txt \
             --base-ref "origin/${{ github.event.repository.default_branch }}" \
             --results-dir results
+          overall="skip"
+          if [ -f results/compare.json ]; then
+            overall="$(python -c 'import json; print(json.load(open("results/compare.json"))["overall"])')"
+          elif [ ! -f results/report.md ]; then
+            overall="skip"
+          fi
+          echo "overall=$overall" >> "$GITHUB_OUTPUT"
+          echo "Gate overall=$overall"
 
       - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: synthetic-hotspot-results
+          name: synthetic-hotspot-results-${{ steps.pr.outputs.number }}
           path: results/
           if-no-files-found: ignore
 
@@ -123,32 +139,32 @@ jobs:
               });
             }
 
-      - name: Land cold PRs; keep recent hotspot proofs open
-        if: always() && steps.pr.outputs.number != ''
+      - name: Auto-merge cold PRs
+        if: steps.change.outputs.kind == 'cold' && steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-          KIND: ${{ steps.change.outputs.kind }}
         run: |
-          if [ "$KIND" = "cold" ]; then
-            gh pr merge "$PR_NUMBER" --squash --delete-branch || true
-          fi
+          gh pr comment "$PR_NUMBER" --body "Cold path: detector quiet-skipped. Auto-merging."
+          gh pr merge "$PR_NUMBER" --squash --delete-branch --admin
+
+      - name: Prune old synthetic hotspot proofs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           python - <<'PY'
           import json
-          import os
           import subprocess
           from datetime import datetime, timezone
 
           def gh(*args) -> str:
               return subprocess.check_output(["gh", *args], text=True)
 
-          raw = gh(
-              "pr", "list",
-              "--label", "synthetic",
-              "--state", "open",
-              "--json", "number,createdAt,labels,title",
+          prs = json.loads(
+              gh("pr", "list", "--label", "synthetic", "--state", "open",
+                 "--json", "number,createdAt,labels")
           )
-          prs = json.loads(raw)
           now = datetime.now(timezone.utc)
           hot = []
           for pr in prs:
@@ -156,13 +172,138 @@ jobs:
               created = datetime.fromisoformat(pr["createdAt"].replace("Z", "+00:00"))
               age_h = (now - created).total_seconds() / 3600
               if "cold" in names:
-                  subprocess.run(["gh", "pr", "merge", str(pr["number"]), "--squash", "--delete-branch"], check=False)
+                  subprocess.run(
+                      ["gh", "pr", "merge", str(pr["number"]), "--squash",
+                       "--delete-branch", "--admin"],
+                      check=False,
+                  )
               elif "hotspot" in names:
                   hot.append((created, pr["number"], age_h))
           hot.sort(reverse=True)
-          for _, number, age_h in hot[2:]:
-              subprocess.run(["gh", "pr", "close", str(number), "--delete-branch", "--comment", "Closing older synthetic hotspot proof."], check=False)
+          for _, number, _ in hot[2:]:
+              subprocess.run(
+                  ["gh", "pr", "close", str(number), "--delete-branch",
+                   "--comment", "Closing older synthetic hotspot proof."],
+                  check=False,
+              )
           for _, number, age_h in hot[:2]:
               if age_h > 3:
-                  subprocess.run(["gh", "pr", "close", str(number), "--delete-branch", "--comment", "Closing synthetic hotspot proof after 3h."], check=False)
+                  subprocess.run(
+                      ["gh", "pr", "close", str(number), "--delete-branch",
+                       "--comment", "Closing synthetic hotspot proof after 3h."],
+                      check=False,
+                  )
           PY
+
+  autofix:
+    name: autofix-agent
+    needs: open-pr
+    if: needs.open-pr.outputs.overall == 'regression'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: refs/pull/${{ needs.open-pr.outputs.number }}/head
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Announce autofix agent
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.open-pr.outputs.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "$(cat <<'EOF'
+          ## Autofix agent
+
+          Detector signaled `regression`. Restoring base `HASH_ROUNDS`, re-running the gate, and merging if last good vs this PR is `ok`.
+          EOF
+          )"
+
+      - name: Install inbox-api and hotspot-detector
+        run: |
+          pip install -e ".[dev]"
+          pip install "git+https://github.com/kwakuduah12/hotspot-detector.git@main"
+
+      - name: Apply autofix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.open-pr.outputs.number }}
+        run: |
+          branch="$(gh pr view "$PR_NUMBER" --json headRefName -q .headRefName)"
+          git checkout -B "$branch"
+          # compare may not be on this checkout; force the known plant fix
+          python scripts/autofix_regression.py --force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add inbox_api/app/serialize.py
+          if git diff --cached --quiet; then
+            echo "No file changes from autofix"
+            exit 1
+          fi
+          git commit -m "Autofix: restore HASH_ROUNDS after regression signal."
+          git push -u origin "HEAD:refs/heads/${branch}"
+
+      - name: Re-run hotspot gate after autofix
+        id: regate
+        run: |
+          default_branch="${{ needs.open-pr.outputs.default_branch }}"
+          git fetch origin "$default_branch"
+          git diff --name-only "origin/${default_branch}...HEAD" > /tmp/changed.txt
+          hotspot-detector gate \
+            --manifest hotspot-manifest.yaml \
+            --changed-files /tmp/changed.txt \
+            --base-ref "origin/${default_branch}" \
+            --results-dir results
+          overall="$(python -c 'import json; print(json.load(open("results/compare.json"))["overall"])')"
+          echo "overall=$overall" >> "$GITHUB_OUTPUT"
+          echo "Re-gate overall=$overall"
+
+      - name: Update sticky PR comment
+        if: hashFiles('results/report.md') != ''
+        uses: actions/github-script@v9
+        env:
+          PR_NUMBER: ${{ needs.open-pr.outputs.number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- hotspot-detector-report -->';
+            const body = fs.readFileSync('results/report.md', 'utf8');
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Merge after successful autofix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.open-pr.outputs.number }}
+          OVERALL: ${{ steps.regate.outputs.overall }}
+        run: |
+          if [ "$OVERALL" != "ok" ]; then
+            gh pr comment "$PR_NUMBER" --body "Autofix re-gate overall=\`$OVERALL\` (wanted \`ok\`). Leaving PR open."
+            exit 1
+          fi
+          gh pr edit "$PR_NUMBER" --add-label autofixed
+          gh pr comment "$PR_NUMBER" --body "Autofix agent restored base rounds; re-gate is \`ok\`. Auto-merging."
+          gh pr merge "$PR_NUMBER" --squash --delete-branch --admin
