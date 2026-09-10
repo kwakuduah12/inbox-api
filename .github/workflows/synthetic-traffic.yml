@@ -261,7 +261,7 @@ jobs:
           echo "overall=$overall" >> "$GITHUB_OUTPUT"
           echo "Re-gate overall=$overall"
 
-      - name: Update sticky PR comment
+      - name: Post autofix sticky PR comment
         if: hashFiles('results/report.md') != ''
         uses: actions/github-script@v9
         env:
@@ -269,8 +269,19 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const marker = '<!-- hotspot-detector-report -->';
-            const body = fs.readFileSync('results/report.md', 'utf8');
+            // Separate sticky from the original gate report so history stays visible.
+            const marker = '<!-- hotspot-detector-autofix-report -->';
+            const report = fs.readFileSync('results/report.md', 'utf8')
+              .replace('<!-- hotspot-detector-report -->', '')
+              .trimStart();
+            const body = [
+              marker,
+              '## Autofix re-gate report',
+              '',
+              '_Posted after the autofix agent restored base rounds. The original detector sticky above is unchanged._',
+              '',
+              report,
+            ].join('\n');
             const issue_number = Number(process.env.PR_NUMBER);
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
