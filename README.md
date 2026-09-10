@@ -19,7 +19,10 @@ Hotspot map: `hotspot-manifest.yaml`. Cold paths (`health.py`, `config.py`) are 
 
 `synthetic-traffic.yml` runs every 10 minutes on `main` (GitHub cron can drift) and opens a PR the way a periodic pipeline would cut a build:
 
-- **~2 of 3 ticks are cold** (`config.py` or `docs/**`) — gate quiet-skips, no hotspot comment. Cold PRs squash-merge.
-- **~1 of 3 ticks is hot** (`serialize.py`, real AST) — detector posts last good vs this PR. About **one hotspot every 30 minutes**. Those PRs stay open as proofs (oldest closed after a few hours).
+- **Cold** (`config.py` or `docs/**`) — gate quiet-skips, then **auto-merges**.
+- **Hot ok** (`serialize.py` tick marker) — detector posts last good vs this PR (`ok`). Stays open as a proof (oldest closed after a few hours).
+- **Hot regression** (plants `HASH_ROUNDS = 512`) — detector posts `regression`, then a second **autofix agent** job restores base rounds, re-gates, and **auto-merges** when `ok`.
 
-`GITHUB_TOKEN` PRs do not start other workflows, so this job runs the detector itself rather than waiting on `perf.yml`. Manual run: Actions → synthetic-traffic → Run workflow (`hot` / `cold` / `auto`).
+On a 10-minute cadence the pattern is roughly: cold → cold → hot → cold → cold → regression (so ~one hotspot every 30 minutes, and a planted regression about hourly).
+
+`GITHUB_TOKEN` PRs do not start other workflows, so this job runs the detector itself rather than waiting on `perf.yml`. Manual run: Actions → synthetic-traffic → Run workflow (`auto` / `cold` / `hot` / `regression`).
