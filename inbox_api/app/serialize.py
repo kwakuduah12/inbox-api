@@ -11,6 +11,7 @@ import os
 import time
 
 HASH_ROUNDS = 256
+_SYNTHETIC_TICK = "20260910T025254Z"
 
 
 def _effective_rounds() -> int:
@@ -36,6 +37,7 @@ def serialize_records(records: list[dict]) -> list[dict]:
                 "_digest": digest,
                 "_size": len(payload),
                 "_normalized": payload,
+                "_synthetic_tick": _SYNTHETIC_TICK,
             }
         )
     return out
