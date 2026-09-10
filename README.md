@@ -21,7 +21,7 @@ Hotspot map: `hotspot-manifest.yaml`. Cold paths (`health.py`, `config.py`) are 
 
 - **Cold** (`config.py` or `docs/**`) — gate quiet-skips, then **auto-merges**.
 - **Hot ok** (`serialize.py` tick marker) — detector posts last good vs this PR (`ok`). Stays open as a proof (oldest closed after a few hours).
-- **Hot regression** (plants `HASH_ROUNDS = 512`) — detector posts `regression`, then a second **autofix agent** job restores base rounds, re-gates, and **auto-merges** when `ok`.
+- **Hot regression** (plants `HASH_ROUNDS = 512`) — detector posts a sticky `regression` report, then a second **autofix agent** job restores base rounds, posts a **second sticky** re-gate report (does not overwrite the first), and **auto-merges** when `ok`.
 
 On a 10-minute cadence the pattern is roughly: cold → cold → hot → cold → cold → regression (so ~one hotspot every 30 minutes, and a planted regression about hourly).
 
