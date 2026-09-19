@@ -1,0 +1,16 @@
+service_area: inbox
+captured_at: '2026-09-19T11:44:23Z'
+environment:
+  runtime: docker
+  base_url: http://127.0.0.1:8000
+  python: 3.12.14
+  machine: x86_64
+  system: Linux
+  compose: 5c560d25cf29
+repeats: 5
+operations:
+  ingest_bulk:
+    serialize:
+      baseline_ms: 267.87
+    index:
+      baseline_ms: 57.4
