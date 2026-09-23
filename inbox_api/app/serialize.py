@@ -10,8 +10,8 @@ import json
 import os
 import time
 
-HASH_ROUNDS = 256
-_SYNTHETIC_TICK = "20260922T065134Z"
+HASH_ROUNDS = 512
+_SYNTHETIC_TICK = "20260923T165242Z"
 
 
 def _effective_rounds() -> int:
