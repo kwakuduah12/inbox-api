@@ -11,7 +11,7 @@ import os
 import time
 
 HASH_ROUNDS = 256
-_SYNTHETIC_TICK = "20261015T115534Z"
+_SYNTHETIC_TICK = "20261016T055555Z"
 
 
 def _effective_rounds() -> int:
