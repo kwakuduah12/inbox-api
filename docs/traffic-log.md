@@ -76,3 +76,4 @@ Cold-path ticks from the scheduled Jenkins-style job. Listed in `exclude_paths`,
 - `2026-10-21T21:38:43Z` synthetic cold tick `20261021T213843Z` (docs-only; detector should skip)
 - `2026-10-22T00:14:34Z` synthetic cold tick `20261022T001434Z` (docs-only; detector should skip)
 - `2026-10-22T15:13:29Z` synthetic cold tick `20261022T151329Z` (docs-only; detector should skip)
+- `2026-10-22T19:16:16Z` synthetic cold tick `20261022T191616Z` (docs-only; detector should skip)
