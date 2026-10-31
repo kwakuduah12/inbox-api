@@ -10,7 +10,7 @@ import json
 import os
 import time
 
-HASH_ROUNDS = 512
+HASH_ROUNDS = 256
 _SYNTHETIC_TICK = "20261031T015224Z"
 
 
