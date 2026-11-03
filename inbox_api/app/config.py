@@ -1,4 +1,4 @@
 """Cold path: static process configuration. Changes here must not trigger workloads."""
 
 APP_NAME = "inbox"
-VERSION = "0.1.0+20261102T184128Z"
+VERSION = "0.1.0+20261103T080144Z"
